@@ -27,7 +27,7 @@ class ChatEngine:
     @retry(retry=retry_if_not_exception_type(InvalidRequestError), wait=wait_fixed(10))
     def _process_chat_completion(self, **kwargs) -> Dict[str, Any]:
         """Processes ChatGPT API calling."""
-        response = openai.ChatCompletion.create(**kwargs)
+        response = openai.ChatCompletion.create(model=self.model, messages=self.messages, **kwargs)
         message = response["choices"][0]["message"]
         self.messages.append(message)
         return message
@@ -41,10 +41,7 @@ class ChatEngine:
         """
         self.messages.append({"role": "user", "content": user_message})
         try:
-            message = self._process_chat_completion(
-                model=self.model,
-                messages=self.messages
-            )
+            message = self._process_chat_completion()
         except InvalidRequestError as e:
             yield f"## Error while Chat GPT API calling with the user message: {e}"
             return

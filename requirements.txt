@@ -1,3 +1,4 @@
 tenacity
 slack_bolt
 openai
+tiktoken

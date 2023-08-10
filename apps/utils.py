@@ -27,6 +27,9 @@ class WSDatabase:
             "name": "alcohol_consumption",
             "description": "一人当たりの年間アルコール消費量（リットル）"
         },{
+            "name": "region",
+            "description": "地域"
+        },{
             "name": "gdp per capita",
             "description": "一人当たりのGDP（ドル）"
         }

@@ -1,4 +1,7 @@
+wheel
 tenacity
 slack_bolt
 openai
 tiktoken
+pandas
+ipykernel

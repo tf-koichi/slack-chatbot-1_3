@@ -10,6 +10,7 @@ app = App(token=slack_bot_token)
 
 @app.message()
 def handle(message, say):
+    global chat_engine_dict
     if message["user"] not in chat_engine_dict.keys():
         chat_engine_dict[message["user"]] = ChatEngine()
     
@@ -19,6 +20,7 @@ def handle(message, say):
 @app.command("/verbose")
 def custom_command_function(ack, body, respond):
     ack()
+    global chat_engine_dict
     user_id = body["user_id"]
     if user_id not in chat_engine_dict.keys():
         chat_engine_dict[user_id] = ChatEngine()
@@ -38,6 +40,7 @@ def custom_command_function(ack, body, respond):
 @app.command("/style")
 def custom_command_function(ack, body, respond):
     ack()
+    global chat_engine_dict
     user_id = body["user_id"]
     switch = body["text"].lower().strip()
     if switch:

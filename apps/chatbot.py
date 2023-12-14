@@ -18,7 +18,7 @@ def handle(message, say):
         say(reply)
 
 @app.command("/verbose")
-def verbose_function(ack, body, respond):
+def verbose_function(ack, body, respond) -> None:
     ack()
     global chat_engine_dict
     user_id = body["user_id"]
@@ -51,7 +51,9 @@ def style_function(ack, body, respond):
     else:
         respond("まだ会話が始まっていません。")
  
-model = "gpt-4-0613"
+model = "gpt-4-1106-preview"
+# model = "gpt-3.5-turbo-1106"
+
 def quotify(s: str) -> str:
     """Adds quotes to a string.
     Args:

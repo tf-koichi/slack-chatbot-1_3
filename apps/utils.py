@@ -6,13 +6,14 @@ import json
 from pathlib import Path
 import sqlite3
 import pandas as pd
-import openai
-from openai.error import InvalidRequestError
+from openai import OpenAI, BadRequestError
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
 import tiktoken
-from tenacity import retry, retry_if_not_exception_type, wait_fixed
+from tenacity import retry, retry_if_not_exception_type, wait_fixed, stop_after_attempt
 
+repo_root = Path(__file__).parent.parent
 class WSDatabase:
-    data_path = Path("../data/world_stats.sqlite3")
+    data_path = repo_root / "data/world_stats.sqlite3"
     schema = [
         {
             "name": "country",
@@ -119,12 +120,20 @@ class ChatEngine:
         mo = cls.size_pattern.search(cls.model)
         if mo:
             return int(mo.group(1))*1024
-        elif cls.model.startswith("gpt-3.5"):
-            return 4*1024
-        elif cls.model.startswith("gpt-4"):
-            return 8*1024
         else:
-            raise ValueError(f"Unknown model: {cls.model}")
+            match cls.model:
+                case "gpt-3.5-turbo-0613":
+                    return 4*1024
+                case "gpt-4-0613":
+                    return 8*1024
+                case "gpt-4-1106-preview":
+                    return 128*1024
+                case "gpt-3.5-turbo-1106":
+                    return 16*1024
+                case "gpt-3.5-turbo-1106-instruct":
+                    return 4*1024
+                case _:
+                    raise ValueError(f"Unknown model: {cls.model}")
 
     @classmethod
     def setup(cls, model: str, tokens_haircut: float|tuple[float]=0.9, quotify_fn: Callable[[str], str]=lambda x: x) -> None:
@@ -134,7 +143,8 @@ class ChatEngine:
             tokens_haircut (float|Tuple[float]): coefficients to modify the maximum number of tokens allowed for the model.
             quotify_fn (Callable[[str], str]): Function to quotify a string.
         """
-        openai.api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
+        cls.openai_client = OpenAI(api_key=api_key)
         cls.model = model
         cls.enc = tiktoken.encoding_for_model(model)
         match tokens_haircut:
@@ -145,8 +155,9 @@ class ChatEngine:
             case _:
                 raise ValueError(f"Invalid tokens_haircut: {tokens_haircut}")
 
-        cls.functions = [
-            {
+        cls.tools = [{
+            "type": "function",
+            "function": {
                 "name": "ask_database",
                 "description": "世界各国の平均寿命、アルコール消費量、一人あたりGDPのデータベースを検索するための関数。出力はSQLite3が理解できる完全なSQLクエリである必要がある。",
                 "parameters": {
@@ -154,29 +165,30 @@ class ChatEngine:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": f"""
-                                SQL query extracting info to answer the user's question.
-                                SQL should be written using this database schema:
+                            "description": f"""SQL query extracting info to answer the user's question. SQL should be written using this database schema:
 {WSDatabase.schema_str()}
-                            """,
+""",
                         }
                     },
                     "required": ["query"]
                 },
-            }
-        ]
+            },
+        }]
 
         cls.quotify_fn = staticmethod(quotify_fn)
 
 
     @classmethod
-    def estimate_num_tokens(cls, message: dict) -> int:
+    def estimate_num_tokens(cls, message: dict|ChatCompletionMessage) -> int:
         """Estimates the number of tokens of a message.
         Args:
-            message (Dict): The message to estimate the number of tokens of.
+            message (Dict|ChatCompletionMessage): The message to estimate the number of tokens of.
         Returns:
             (int): The estimated number of tokens.
         """
+        if isinstance(message, ChatCompletionMessage):
+            message = message.__dict__
+        
         return len(cls.enc.encode(message["content"]))
     
     def __init__(self, style: str="博多弁") -> None:
@@ -201,19 +213,21 @@ class ChatEngine:
     def verbose(self, value: bool) -> None:
         self._verbose = value
     
-    @retry(retry=retry_if_not_exception_type(InvalidRequestError), wait=wait_fixed(10))
-    def _process_chat_completion(self, **kwargs) -> dict[str, Any]:
+    @retry(retry=retry_if_not_exception_type(BadRequestError), wait=wait_fixed(10), stop=stop_after_attempt(3))
+    def _process_chat_completion(self, **kwargs) -> ChatCompletionMessage:
         """Processes ChatGPT API calling."""
         self.messages.trim(self.max_num_tokens)
-        response = openai.ChatCompletion.create(
+        response = self.openai_client.chat.completions.create(
             model=self.model,
             messages=self.messages.messages,
             **kwargs
         )
-        assert isinstance(response, dict)
-        message = response["choices"][0]["message"]
-        usage = response["usage"]
-        self.messages.append(message, num_tokens=usage["completion_tokens"] - self.completion_tokens_prev)
+        message = response.choices[0].message
+        usage = response.usage.__dict__
+        print(usage)
+        self.messages.append(message, num_tokens=usage["completion_tokens"])
+        print(self.estimate_num_tokens(self.messages.messages[-2]))
+        print(self.estimate_num_tokens(self.messages.messages[-1]), usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
         self.messages.num_tokens[-2] = usage["prompt_tokens"] - self.total_tokens_prev
         self.completion_tokens_prev = usage["completion_tokens"]
         self.total_tokens_prev = usage["total_tokens"]
@@ -230,39 +244,45 @@ class ChatEngine:
         self.messages.append(message)
         try:
             message = self._process_chat_completion(
-                functions=self.functions,
+                tools=self.tools,
             )
-        except InvalidRequestError as e:
+        except BadRequestError as e:
             yield f"## Error while Chat GPT API calling with the user message: {e}"
             return
         
-        while message.get("function_call"):
-            function_name = message["function_call"]["name"]
-            arguments = json.loads(message["function_call"]["arguments"])
-            if self._verbose:
-                yield self.quotify_fn(f"function name: {function_name}")
-                yield self.quotify_fn(f"arguments: {arguments}")
-            
-            if function_name == "ask_database":
-                with WSDatabase() as db:
-                    function_response = db.ask_database(arguments["query"])
-            else:
-                function_response = f"## Unknown function name: {function_name}"
+        if (tool_calls := message.tool_calls) is not None:
+            if message.content:
+                yield message.content
 
-            if self._verbose:
-                yield self.quotify_fn(f"function response:\n{function_response}")
-                        
-            self.messages.append({
-                        "role": "function",
-                        "name": function_name,
-                        "content": function_response
-            })
+            for tool_call in tool_calls:
+                function_name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+                if self._verbose:
+                    yield self.quotify_fn(f"function name: {function_name}")
+                    yield self.quotify_fn(f"arguments: {arguments}")
+                
+                if function_name == "ask_database":
+                    with WSDatabase() as db:
+                        function_response = db.ask_database(arguments["query"])
+                else:
+                    function_response = f"## Unknown function name: {function_name}"
+
+                if self._verbose:
+                    yield self.quotify_fn(f"function response:\n{function_response}")
+                            
+                self.messages.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": function_name,
+                    "content": function_response
+                })
+
             try:
                 message = self._process_chat_completion()
-            except InvalidRequestError as e:
+            except BadRequestError as e:
                 yield f"## Error while ChatGPT API calling with the function response: {e}"
                 self.messages.rollback(3)
                 return
 
-        yield message['content']
+        yield message.content
 

@@ -224,12 +224,8 @@ class ChatEngine:
         )
         message = response.choices[0].message
         usage = response.usage.__dict__
-        print(usage)
         self.messages.append(message, num_tokens=usage["completion_tokens"])
-        print(self.estimate_num_tokens(self.messages.messages[-2]))
-        print(self.estimate_num_tokens(self.messages.messages[-1]), usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
         self.messages.num_tokens[-2] = usage["prompt_tokens"] - self.total_tokens_prev
-        self.completion_tokens_prev = usage["completion_tokens"]
         self.total_tokens_prev = usage["total_tokens"]
         return message
     

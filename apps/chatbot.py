@@ -18,8 +18,9 @@ def handle(message, say):
         say(reply)
 
 @app.command("/verbose")
-def verbose_function(ack, body, respond) -> None:
+def verbose_function(ack, body, respond):
     ack()
+    print(body)
     global chat_engine_dict
     user_id = body["user_id"]
     if user_id not in chat_engine_dict.keys():
